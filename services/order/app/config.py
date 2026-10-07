@@ -1,0 +1,40 @@
+from functools import lru_cache
+from urllib.parse import quote_plus
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(extra="ignore")
+
+    SERVICE_NAME: str = "order"
+    LOG_LEVEL: str = "INFO"
+
+    PRODUCT_URL: str = "http://product:8000"
+    PAYMENT_URL: str = "http://payment:8000"
+    SHIPPING_URL: str = "http://shipping:8000"
+    DEPENDENCY_TIMEOUT_SECONDS: float = 5.0
+    QUOTE_TTL_MINUTES: int = 30
+    OUTBOX_INTERVAL_SECONDS: float = 2.0
+
+    # DATABASE_URL overrides the POSTGRES_* parts (used by tests with SQLite).
+    DATABASE_URL: str | None = None
+    POSTGRES_USER: str = "opspilot"
+    POSTGRES_PASSWORD: str = "opspilot"
+    POSTGRES_HOST: str = "postgres"
+    POSTGRES_PORT: int = 5432
+    DB_NAME: str = "order_db"
+
+    @property
+    def database_url(self) -> str:
+        if self.DATABASE_URL:
+            return self.DATABASE_URL
+        return (
+            f"postgresql+psycopg://{quote_plus(self.POSTGRES_USER)}:{quote_plus(self.POSTGRES_PASSWORD)}"
+            f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.DB_NAME}"
+        )
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

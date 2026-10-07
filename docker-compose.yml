@@ -1,0 +1,122 @@
+x-service-healthcheck: &service-healthcheck
+  test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
+  interval: 5s
+  timeout: 3s
+  retries: 12
+
+x-depends-on-postgres: &depends-on-postgres
+  postgres: { condition: service_healthy }
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # -h 127.0.0.1: the temporary server used while running init scripts only listens on
+      # the unix socket, so this stays unhealthy until the databases have been created.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER}"]
+      interval: 5s
+      retries: 10
+
+  auth:
+    build: { context: ., dockerfile: services/auth/Dockerfile }
+    env_file: .env
+    environment: { SERVICE_NAME: auth, DB_NAME: auth_db }
+    ports: ["8001:8000"]
+    depends_on: *depends-on-postgres
+    healthcheck: *service-healthcheck
+
+  order:
+    build: { context: ., dockerfile: services/order/Dockerfile }
+    env_file: .env
+    environment: { SERVICE_NAME: order, DB_NAME: order_db }
+    ports: ["8002:8000"]
+    depends_on: *depends-on-postgres
+    healthcheck: *service-healthcheck
+
+  product:
+    build: { context: ., dockerfile: services/product/Dockerfile }
+    env_file: .env
+    environment: { SERVICE_NAME: product, DB_NAME: product_db }
+    ports: ["8003:8000"]
+    depends_on: *depends-on-postgres
+    healthcheck: *service-healthcheck
+
+  payment:
+    build: { context: ., dockerfile: services/payment/Dockerfile }
+    env_file: .env
+    environment: { SERVICE_NAME: payment, DB_NAME: payment_db }
+    ports: ["8004:8000"]
+    depends_on: *depends-on-postgres
+    healthcheck: *service-healthcheck
+
+  shipping:
+    build: { context: ., dockerfile: services/shipping/Dockerfile }
+    env_file: .env
+    environment: { SERVICE_NAME: shipping, DB_NAME: shipping_db }
+    ports: ["8005:8000"]
+    depends_on: *depends-on-postgres
+    healthcheck: *service-healthcheck
+
+  gateway:
+    build: { context: ., dockerfile: services/gateway/Dockerfile }
+    env_file: .env
+    environment:
+      SERVICE_NAME: gateway
+      AUDIT_LOG_PATH: /data/audit.jsonl
+      # can be raised from the shell for eval runs, e.g. RATE_LIMIT_READ_PER_MIN=1000 docker compose up -d gateway
+      RATE_LIMIT_READ_PER_MIN: ${RATE_LIMIT_READ_PER_MIN:-10}
+      RATE_LIMIT_WRITE_PER_MIN: ${RATE_LIMIT_WRITE_PER_MIN:-3}
+    ports: ["8010:8000"]
+    volumes: [gateway-data:/data]
+    depends_on:
+      order: { condition: service_healthy }
+      product: { condition: service_healthy }
+      payment: { condition: service_healthy }
+      shipping: { condition: service_healthy }
+      approval: { condition: service_healthy }
+    healthcheck: *service-healthcheck
+
+  approval:
+    build: { context: ., dockerfile: services/approval/Dockerfile }
+    env_file: .env
+    environment: { SERVICE_NAME: approval, DB_NAME: approval_db }
+    ports: ["8011:8000"]
+    depends_on: *depends-on-postgres
+    healthcheck: *service-healthcheck
+
+  agent:
+    build: { context: ., dockerfile: services/agent/Dockerfile }
+    env_file: .env
+    environment: { SERVICE_NAME: agent, DB_NAME: agent_db }
+    ports: ["8020:8000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      gateway: { condition: service_healthy }
+    healthcheck: *service-healthcheck
+
+  ui:
+    build: ./ui
+    env_file: .env
+    ports: ["8501:8501"]
+    depends_on:
+      agent: { condition: service_healthy }
+      approval: { condition: service_healthy }
+
+  e2e:
+    build: ./tests/e2e
+    env_file: .env
+    profiles: [test]
+    depends_on:
+      agent: { condition: service_healthy }
+      approval: { condition: service_healthy }
+
+volumes:
+  pgdata:
+  gateway-data:
