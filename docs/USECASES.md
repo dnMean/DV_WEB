@@ -28,7 +28,7 @@ Shipment: WAITING_PICKUP ──► IN_TRANSIT ──► DELIVERED
 Payment:  SUCCESS ──► PARTIALLY_REFUNDED ──► REFUNDED
 ```
 
-**Chủ sở hữu dữ liệu:** Shipping là nguồn sự thật về vận chuyển; Order chỉ nhận cập nhật từ Shipping. Payment là nguồn sự thật về tiền; Order chỉ nhận cập nhật `refunded_amount` từ Payment. Không service nào sửa DB của service khác; mọi cập nhật chéo đi qua endpoint `/internal/*` (xác thực bằng `X-Internal-Secret`).
+**Chủ sở hữu dữ liệu:** Shipping là nguồn sự thật về vận chuyển; Order chỉ nhận cập nhật từ Shipping. Payment là nguồn sự thật về tiền; Order chỉ nhận cập nhật `refunded_amount` từ Payment. Không service nào sửa DB của service khác; mọi cập nhật chéo đi qua **gRPC** (hợp đồng trong `proto/`, xác thực bằng metadata `x-internal-secret`).
 
 ## 2. Quy tắc hoàn tiền
 
@@ -60,8 +60,8 @@ Payment:  SUCCESS ──► PARTIALLY_REFUNDED ──► REFUNDED
 Chỉ **khách** (role customer) đặt hàng và thanh toán; staff không có các tool này.
 
 1. **Báo giá** (`quote_order`, chỉ đọc kho): khách nêu sản phẩm, số lượng (1–10 mỗi món), tên người nhận, số điện thoại, địa chỉ. Order đọc giá và tồn kho hiện tại từ Product. Sản phẩm không tồn tại → 404 `product_not_found`; không đủ hàng → 409 `out_of_stock`. Báo giá có **mã 6 ký tự** (không dùng 0/O/1/I/L), hết hạn sau `QUOTE_TTL_MINUTES` (mặc định 30). **Không trừ kho, không tạo đơn.**
-2. **Đặt hàng** (`place_order`): Gateway chỉ cho gọi khi **chính tin nhắn của khách chứa mã báo giá** (`confirm_args`, như mục duyệt hoàn tiền). Mã do hệ thống sinh trong lượt báo giá, nên khách không thể gõ trước và agent không thể đặt hàng ngay trong lượt vừa báo giá. Order trừ kho **đồng bộ** (Product `/internal/inventory/reserve`: đủ hàng cho mọi món hoặc không trừ gì), rồi tạo đơn `PENDING` với giá trong báo giá và lưu thông tin giao hàng. Xác nhận lại cùng mã → trả đơn cũ, không trừ kho lần hai. Báo giá của người khác → 404 `quote_not_found`; hết hạn → 409 `quote_expired`.
-3. **Thanh toán giả lập** (`pay_order`): tin nhắn của khách phải chứa mã đơn. **Chỉ phương thức trả trước** (`CARD`, `BANK_TRANSFER`, `E_WALLET`); COD bị từ chối (422 `invalid_arguments`) vì tiền chỉ thu khi giao, nên đơn không thể là `PAID` lúc đặt. Chỉ đơn `PENDING` của chính khách; đơn đã thanh toán → 409 `order_already_paid`, đã huỷ → 409 `order_not_payable`. Order gọi Payment **đồng bộ** (`/internal/payments`, luôn thành công, một thanh toán mỗi đơn) **trước**, rồi mới chuyển đơn sang `PAID`; Payment không phản hồi → 503, đơn giữ `PENDING`. Vận đơn `WAITING_PICKUP` được tạo qua outbox (Shipping `/internal/shipments`, idempotent theo mã đơn). Đơn seed chưa có thông tin giao hàng → 422 `delivery_info_required`, khách gửi kèm tên, số điện thoại, địa chỉ.
+2. **Đặt hàng** (`place_order`): Gateway chỉ cho gọi khi **chính tin nhắn của khách chứa mã báo giá** (`confirm_args`, như mục duyệt hoàn tiền). Mã do hệ thống sinh trong lượt báo giá, nên khách không thể gõ trước và agent không thể đặt hàng ngay trong lượt vừa báo giá. Order trừ kho **đồng bộ** (gRPC `ProductInternal.Reserve`: đủ hàng cho mọi món hoặc không trừ gì), rồi tạo đơn `PENDING` với giá trong báo giá và lưu thông tin giao hàng. Xác nhận lại cùng mã → trả đơn cũ, không trừ kho lần hai. Báo giá của người khác → 404 `quote_not_found`; hết hạn → 409 `quote_expired`.
+3. **Thanh toán giả lập** (`pay_order`): tin nhắn của khách phải chứa mã đơn. **Chỉ phương thức trả trước** (`CARD`, `BANK_TRANSFER`, `E_WALLET`); COD bị từ chối (422 `invalid_arguments`) vì tiền chỉ thu khi giao, nên đơn không thể là `PAID` lúc đặt. Chỉ đơn `PENDING` của chính khách; đơn đã thanh toán → 409 `order_already_paid`, đã huỷ → 409 `order_not_payable`. Order gọi Payment **đồng bộ** (gRPC `PaymentInternal.Charge`, luôn thành công, một thanh toán mỗi đơn) **trước**, rồi mới chuyển đơn sang `PAID`; Payment không phản hồi → 503, đơn giữ `PENDING`. Vận đơn `WAITING_PICKUP` được tạo qua outbox (gRPC `ShippingInternal.CreateShipment`, idempotent theo mã đơn). Đơn seed chưa có thông tin giao hàng → 422 `delivery_info_required`, khách gửi kèm tên, số điện thoại, địa chỉ.
 4. Từ đây đơn mới đi theo đúng các quy tắc ở mục 2–3: huỷ khi `PENDING` thì cộng lại kho; hoàn tiền khi `PAID` thì hoàn toàn bộ, huỷ vận đơn, cộng kho.
 
 ## 4. Đồng bộ giữa các service
@@ -77,7 +77,9 @@ Chỉ **khách** (role customer) đặt hàng và thanh toán; staff không có 
 | Order → `REFUNDED` từ `PAID` (Order) | Product: cộng kho | outbox của Order | Retry, idempotent |
 | Vận đơn đổi trạng thái (Shipping) | Order: `SHIPPING`/`DELIVERED` | outbox của Shipping | Retry, idempotent |
 
-**Outbox**: bản ghi "cần gọi service X" được lưu **cùng transaction** với thay đổi dữ liệu, sau đó được gửi ngay; nếu lỗi mạng/5xx thì một luồng nền gửi lại (backoff tới 60s, tối đa 8 lần). Nhờ vậy không có trạng thái "đã hoàn tiền nhưng quên báo Order" khi Order tạm thời chết.
+Mọi lời gọi trong bảng là gRPC (`proto/<service>.proto`); lỗi nghiệp vụ đi kèm mã HTTP tương đương (404/409/422) trong `details` của gRPC status nên bên gọi xử lý như trước.
+
+**Outbox**: bản ghi "cần gọi service X" (tên RPC + payload) được lưu **cùng transaction** với thay đổi dữ liệu, sau đó được gửi ngay; nếu lỗi mạng/5xx (`UNAVAILABLE`, `DEADLINE_EXCEEDED`...) thì một timer nền gửi lại (backoff tới 60s, tối đa 8 lần). Nhờ vậy không có trạng thái "đã hoàn tiền nhưng quên báo Order" khi Order tạm thời chết.
 
 ## 5. Danh sách use case
 
@@ -193,7 +195,8 @@ Tài khoản seed: `alice` (đơn 1001 DELIVERED, 1002 SHIPPING, 1003 PAID), `bo
 ```bash
 docker compose up -d --build
 docker compose --profile test run --rm e2e      # use case end-to-end (reset dữ liệu trước mỗi test)
-for s in auth order product payment shipping gateway approval agent; do docker compose run --rm --no-deps $s pytest -q; done
+(cd services/gateway && npm test)                # unit test Gateway (registry, Ajv, idempotency key)
+docker compose run --rm --no-deps agent pytest -q  # unit test Agent (Python)
 ```
 
 `/internal/reset` (chỉ khi `ALLOW_RESET=true` và có `X-Internal-Secret`) đưa DB mỗi service về seed; dùng cho e2e và eval. Tắt `ALLOW_RESET` khi không phải môi trường dev.

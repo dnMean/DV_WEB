@@ -1,0 +1,48 @@
+// Product: catalog and stock, called by Order (docs/USECASES.md section 4).
+syntax = "proto3";
+
+package opspilot.product;
+
+service ProductInternal {
+  // Current name, price and stock of several products (quote).
+  rpc GetCatalog (CatalogRequest) returns (CatalogReply);
+  // Take every item out of stock, or nothing (FAILED_PRECONDITION out_of_stock). Idempotent per key.
+  rpc Reserve (StockRequest) returns (ReserveReply);
+  // Put items back in stock (cancel / refund before shipping). Idempotent per key.
+  rpc Restock (StockRequest) returns (RestockReply);
+}
+
+message CatalogRequest {
+  repeated int32 ids = 1;
+}
+
+message CatalogItem {
+  int32 id = 1;
+  string name = 2;
+  int64 price = 3;
+  int32 stock = 4;
+}
+
+message CatalogReply {
+  repeated CatalogItem items = 1;
+}
+
+message StockItem {
+  int32 product_id = 1;
+  int32 qty = 2;
+}
+
+message StockRequest {
+  repeated StockItem items = 1;
+  string reason = 2;
+  string idempotency_key = 3;
+}
+
+message ReserveReply {
+  bool replayed = 1;
+  repeated CatalogItem items = 2;
+}
+
+message RestockReply {
+  bool replayed = 1;
+}

@@ -1,0 +1,26 @@
+// Payment: simulated charge, called by Order when a customer pays (docs/USECASES.md section 3b).
+syntax = "proto3";
+
+package opspilot.payment;
+
+service PaymentInternal {
+  // Always succeeds; one payment per order, so a retried call returns the same payment.
+  rpc Charge (ChargeRequest) returns (Payment);
+}
+
+message ChargeRequest {
+  int32 order_id = 1;
+  int32 user_id = 2;
+  int64 amount = 3;
+  string method = 4;
+}
+
+message Payment {
+  int32 id = 1;
+  int32 order_id = 2;
+  int32 user_id = 3;
+  int64 amount = 4;
+  string method = 5;
+  string status = 6;
+  string created_at = 7;
+}

@@ -1,0 +1,31 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Product {
+  id          Int    @id @default(autoincrement())
+  sku         String @unique @db.VarChar(40)
+  name        String @db.VarChar(200)
+  category    String @db.VarChar(50)
+  description String @default("")
+  price       Int // VND
+  stock       Int    @default(0)
+  // Lowercased, accent-stripped name + category + description, for accent-insensitive search.
+  searchText  String @default("") @map("search_text")
+
+  @@map("products")
+}
+
+/// Processed restock/reserve requests, so a retried call never changes stock twice.
+model RestockLog {
+  id             Int    @id @default(autoincrement())
+  idempotencyKey String @unique @map("idempotency_key") @db.VarChar(128)
+  reason         String @default("") @db.VarChar(200)
+
+  @@map("restock_log")
+}

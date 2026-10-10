@@ -1,0 +1,26 @@
+{
+  "name": "@opspilot/gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpsPilot Tool Gateway: tool registry from Swagger, Ajv validation, Redis rate limit + idempotency lock, approval",
+  "scripts": {
+    "sync-common": "rm -rf src/common && cp -R ../../libs/node-common/src src/common",
+    "prebuild": "npm run sync-common",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "pretest": "npm run build",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.14.0",
+    "@grpc/proto-loader": "^0.8.0",
+    "ajv": "^8.17.0",
+    "fastify": "^5.6.0",
+    "ioredis": "^5.8.0",
+    "jose": "^5.10.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}

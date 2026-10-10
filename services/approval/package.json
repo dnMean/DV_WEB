@@ -1,0 +1,33 @@
+{
+  "name": "@opspilot/approval",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpsPilot Approval service: tickets for high risk tool calls (NestJS + Prisma, HTTP + gRPC)",
+  "scripts": {
+    "sync-common": "rm -rf src/common && cp -R ../../libs/node-common/src src/common",
+    "prebuild": "npm run sync-common && prisma generate",
+    "build": "tsc -p tsconfig.json",
+    "start": "prisma db push --skip-generate --accept-data-loss && node dist/main.js"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.14.0",
+    "@grpc/proto-loader": "^0.8.0",
+    "@nestjs/common": "^11.1.0",
+    "@nestjs/core": "^11.1.0",
+    "@nestjs/microservices": "^11.1.0",
+    "@nestjs/platform-express": "^11.1.0",
+    "@nestjs/swagger": "^11.2.0",
+    "@prisma/client": "^6.19.0",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.2",
+    "jose": "^5.10.0",
+    "prisma": "^6.19.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}

@@ -1,0 +1,45 @@
+// Shipping: shipments created by Order, read and cancelled by Payment (docs/USECASES.md section 4).
+syntax = "proto3";
+
+package opspilot.shipping;
+
+service ShippingInternal {
+  // One shipment per order: a retried call returns the existing one.
+  rpc CreateShipment (CreateShipmentRequest) returns (Shipment);
+  rpc GetShipment (ShipmentRef) returns (Shipment);
+  // Cancel a shipment still WAITING_PICKUP (refund before shipping); FAILED_PRECONDITION once dispatched.
+  rpc CancelShipment (ShipmentRef) returns (Shipment);
+}
+
+message ShipmentRef {
+  int32 order_id = 1;
+  string idempotency_key = 2;
+}
+
+message CreateShipmentRequest {
+  int32 order_id = 1;
+  int32 user_id = 2;
+  string recipient_name = 3;
+  string recipient_phone = 4;
+  string address = 5;
+}
+
+message ShipmentEvent {
+  string status = 1;
+  string location = 2;
+  string description = 3;
+  string occurred_at = 4;
+}
+
+message Shipment {
+  int32 order_id = 1;
+  int32 user_id = 2;
+  string status = 3;
+  string carrier = 4;
+  string tracking_code = 5;
+  string recipient_name = 6;
+  string recipient_phone = 7;
+  string address = 8;
+  string updated_at = 9;
+  repeated ShipmentEvent events = 10;
+}

@@ -1,0 +1,25 @@
+// Auth: user lookup and token verification for other services.
+syntax = "proto3";
+
+package opspilot.auth;
+
+service AuthInternal {
+  rpc GetUser (UserRef) returns (User);
+  rpc VerifyToken (TokenRequest) returns (User);
+}
+
+message UserRef {
+  int32 user_id = 1;
+}
+
+message TokenRequest {
+  string token = 1;
+}
+
+message User {
+  int32 id = 1;
+  string username = 2;
+  string role = 3;
+  string email = 4;
+  string phone = 5;
+}

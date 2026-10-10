@@ -5,3 +5,6 @@
 **/*.egg-info
 **/.venv
 eval/results
+**/node_modules
+**/dist
+services/*/src/common

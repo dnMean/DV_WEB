@@ -1,0 +1,42 @@
+// Approval: tickets for high risk tool calls, created and read by the Gateway.
+syntax = "proto3";
+
+package opspilot.approval;
+
+service ApprovalInternal {
+  // Returns the existing ticket (created = false) when an identical request is pending or executed.
+  rpc CreateTicket (CreateTicketRequest) returns (CreateTicketReply);
+  rpc GetTicket (TicketRef) returns (Ticket);
+}
+
+message CreateTicketRequest {
+  string conversation_id = 1;
+  int32 user_id = 2;
+  string tool = 3;
+  string arguments_json = 4;
+  // subset of arguments identifying "the same request"; empty = all arguments
+  string dedup_arguments_json = 5;
+}
+
+message CreateTicketReply {
+  bool created = 1;
+  Ticket ticket = 2;
+}
+
+message TicketRef {
+  string ticket_id = 1;
+}
+
+message Ticket {
+  string id = 1;
+  string conversation_id = 2;
+  int32 user_id = 3;
+  string tool = 4;
+  string arguments_json = 5;
+  string status = 6;
+  int32 reviewer_id = 7;   // 0 = not reviewed
+  string review_note = 8;
+  string result_json = 9;  // empty = no result yet
+  string created_at = 10;
+  string updated_at = 11;
+}

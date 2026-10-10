@@ -1,4 +1,13 @@
-x-service-healthcheck: &service-healthcheck
+# Each business service is its own container + database, and exposes:
+#   :8000  HTTP (REST + Swagger at /docs, /openapi.json) for the Gateway, the UI and the tests
+#   :50051 gRPC (contracts in proto/) for the other services
+x-node-healthcheck: &node-healthcheck
+  test: ["CMD", "node", "-e", "fetch('http://localhost:8000/health').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+  interval: 5s
+  timeout: 3s
+  retries: 20
+
+x-python-healthcheck: &python-healthcheck
   test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
   interval: 5s
   timeout: 3s
@@ -24,13 +33,20 @@ services:
       interval: 5s
       retries: 10
 
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
   auth:
     build: { context: ., dockerfile: services/auth/Dockerfile }
     env_file: .env
     environment: { SERVICE_NAME: auth, DB_NAME: auth_db }
     ports: ["8001:8000"]
     depends_on: *depends-on-postgres
-    healthcheck: *service-healthcheck
+    healthcheck: *node-healthcheck
 
   order:
     build: { context: ., dockerfile: services/order/Dockerfile }
@@ -38,7 +54,7 @@ services:
     environment: { SERVICE_NAME: order, DB_NAME: order_db }
     ports: ["8002:8000"]
     depends_on: *depends-on-postgres
-    healthcheck: *service-healthcheck
+    healthcheck: *node-healthcheck
 
   product:
     build: { context: ., dockerfile: services/product/Dockerfile }
@@ -46,7 +62,7 @@ services:
     environment: { SERVICE_NAME: product, DB_NAME: product_db }
     ports: ["8003:8000"]
     depends_on: *depends-on-postgres
-    healthcheck: *service-healthcheck
+    healthcheck: *node-healthcheck
 
   payment:
     build: { context: ., dockerfile: services/payment/Dockerfile }
@@ -54,7 +70,7 @@ services:
     environment: { SERVICE_NAME: payment, DB_NAME: payment_db }
     ports: ["8004:8000"]
     depends_on: *depends-on-postgres
-    healthcheck: *service-healthcheck
+    healthcheck: *node-healthcheck
 
   shipping:
     build: { context: ., dockerfile: services/shipping/Dockerfile }
@@ -62,7 +78,15 @@ services:
     environment: { SERVICE_NAME: shipping, DB_NAME: shipping_db }
     ports: ["8005:8000"]
     depends_on: *depends-on-postgres
-    healthcheck: *service-healthcheck
+    healthcheck: *node-healthcheck
+
+  approval:
+    build: { context: ., dockerfile: services/approval/Dockerfile }
+    env_file: .env
+    environment: { SERVICE_NAME: approval, DB_NAME: approval_db }
+    ports: ["8011:8000"]
+    depends_on: *depends-on-postgres
+    healthcheck: *node-healthcheck
 
   gateway:
     build: { context: ., dockerfile: services/gateway/Dockerfile }
@@ -76,20 +100,13 @@ services:
     ports: ["8010:8000"]
     volumes: [gateway-data:/data]
     depends_on:
+      redis: { condition: service_healthy }
       order: { condition: service_healthy }
       product: { condition: service_healthy }
       payment: { condition: service_healthy }
       shipping: { condition: service_healthy }
       approval: { condition: service_healthy }
-    healthcheck: *service-healthcheck
-
-  approval:
-    build: { context: ., dockerfile: services/approval/Dockerfile }
-    env_file: .env
-    environment: { SERVICE_NAME: approval, DB_NAME: approval_db }
-    ports: ["8011:8000"]
-    depends_on: *depends-on-postgres
-    healthcheck: *service-healthcheck
+    healthcheck: *node-healthcheck
 
   agent:
     build: { context: ., dockerfile: services/agent/Dockerfile }
@@ -99,7 +116,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       gateway: { condition: service_healthy }
-    healthcheck: *service-healthcheck
+    healthcheck: *python-healthcheck
 
   ui:
     build: ./ui

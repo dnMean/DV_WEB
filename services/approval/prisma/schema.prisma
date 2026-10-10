@@ -1,0 +1,30 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// PENDING -> APPROVED -> EXECUTED | FAILED, or PENDING -> REJECTED.
+model Ticket {
+  id             String   @id @default(uuid()) @db.VarChar(36)
+  conversationId String   @default("") @map("conversation_id") @db.VarChar(100)
+  userId         Int      @map("user_id")
+  tool           String   @db.VarChar(100)
+  arguments      Json
+  status         String   @default("PENDING") @db.VarChar(20)
+  reviewerId     Int?     @map("reviewer_id")
+  reviewNote     String?  @map("review_note")
+  result         Json?
+  // sha256(user_id|tool|canonical arguments): detects repeated identical requests
+  dedupKey       String   @map("dedup_key") @db.VarChar(64)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@index([userId])
+  @@index([status])
+  @@index([dedupKey])
+  @@map("tickets")
+}

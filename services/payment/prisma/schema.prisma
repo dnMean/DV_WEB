@@ -1,0 +1,59 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Payment {
+  id        Int      @id @default(autoincrement())
+  orderId   Int      @unique @map("order_id")
+  userId    Int      @map("user_id") // denormalized for ownership checks
+  amount    Int // VND
+  method    String   @db.VarChar(30)
+  status    String   @default("SUCCESS") @db.VarChar(30) // SUCCESS | PARTIALLY_REFUNDED | REFUNDED
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  refunds   Refund[]
+
+  @@index([userId])
+  @@map("payments")
+}
+
+model Refund {
+  id             Int      @id @default(autoincrement())
+  paymentId      Int      @map("payment_id")
+  orderId        Int      @map("order_id")
+  userId         Int      @map("user_id")
+  amount         Int
+  reason         String
+  status         String   @default("SUCCESS") @db.VarChar(20)
+  // unique: the same key (= approval ticket id) never refunds twice
+  idempotencyKey String   @unique @map("idempotency_key") @db.VarChar(128)
+  requestedBy    Int      @map("requested_by") // end user (system: X-On-Behalf-Of) or staff id
+  requestedRole  String   @map("requested_role") @db.VarChar(20)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz
+  payment        Payment  @relation(fields: [paymentId], references: [id])
+
+  @@index([paymentId])
+  @@index([orderId])
+  @@map("refunds")
+}
+
+/// Transactional outbox: gRPC calls to other services, committed with the change that caused them.
+model OutboxMessage {
+  id             Int      @id @default(autoincrement())
+  target         String   @db.VarChar(30)
+  method         String   @db.VarChar(60)
+  payload        Json
+  idempotencyKey String   @map("idempotency_key") @db.VarChar(128)
+  status         String   @default("PENDING") @db.VarChar(10)
+  attempts       Int      @default(0)
+  lastError      String?  @map("last_error")
+  createdAt      DateTime @default(now()) @map("created_at")
+  nextAttemptAt  DateTime @default(now()) @map("next_attempt_at")
+
+  @@index([status])
+  @@map("outbox")
+}

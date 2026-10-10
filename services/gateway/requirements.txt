@@ -1,7 +1,0 @@
-fastapi>=0.115,<1
-uvicorn[standard]>=0.30,<1
-pydantic-settings>=2.4,<3
-pyjwt>=2.9,<3
-httpx>=0.27,<1
-jsonschema>=4.22,<5
-pytest>=8,<9

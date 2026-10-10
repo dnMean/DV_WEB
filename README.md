@@ -2,6 +2,23 @@
 
 AI Agent gọi microservices như tools, có thiết kế, giới hạn và kiểm soát. Spec đầy đủ: [SPEC.md](SPEC.md). **Use case và quy tắc nghiệp vụ xuyên service: [docs/USECASES.md](docs/USECASES.md)** (nguồn sự thật cho hành vi; mỗi UC có test e2e). Các quyết định thiết kế: [docs/DECISIONS.md](docs/DECISIONS.md).
 
+## Công nghệ
+
+| Thành phần | Công nghệ | Ghi chú |
+|---|---|---|
+| UI | Python, Streamlit | Chat / Approvals / Vận chuyển / Tools / Trace |
+| Agent | Python, FastAPI, OpenAI SDK, agent loop tự viết | Guardrails, giới hạn 6 vòng / 12.000 token |
+| Tool Gateway | TypeScript, Fastify, Ajv, Redis | Registry tool đọc từ Swagger các service; Ajv kiểm tra tham số theo JSON Schema; Redis giữ rate limit và khoá idempotency |
+| Auth, Order, Product, Payment, Shipping, Approval | TypeScript, NestJS, `@nestjs/swagger`, Prisma, `jose` (JWT) | Mỗi service là **một microservice độc lập**: container riêng, DB riêng, HTTP (REST + Swagger) cho Gateway/UI và **gRPC** cho service khác |
+| Giao tiếp service ↔ service | gRPC (`@grpc/grpc-js`), hợp đồng trong [proto/](proto/) | Đồng bộ (đặt hàng, thanh toán, huỷ vận đơn) và qua outbox (cộng kho, đồng bộ trạng thái) |
+| Database | PostgreSQL 16, mỗi service một DB | |
+
+```
+UI ──HTTP──► Agent ──HTTP──► Gateway ──HTTP (tool theo Swagger)──► Order / Product / Payment / Shipping / Approval
+                                 │                                        │  ▲
+                                 └──gRPC──► Approval (tạo/đọc ticket)     └──┴── gRPC giữa các service (proto/)
+```
+
 ## Trạng thái
 
 | Phase | Nội dung | Trạng thái |
@@ -27,17 +44,20 @@ Mở http://localhost:8501 và đăng nhập.
 | Service | Host port | Ghi chú |
 |---|---|---|
 | ui | 8501 | Streamlit: Chat, Approvals, Vận chuyển, Tools, Trace |
-| auth | 8001 | `POST /auth/login`, `GET /auth/me` |
-| order | 8002 | `list_my_orders`, `get_order`, `cancel_order`, `quote_order`, `place_order`, `pay_order` |
-| product | 8003 | `search_products`, `get_product`, `check_stock` |
-| payment | 8004 | `get_payment`, `refund_payment` (high risk) |
-| shipping | 8005 | `get_shipment`, `update_shipping_address` |
+| auth | 8001 | `POST /auth/login`, `GET /auth/me`; gRPC `AuthInternal` |
+| order | 8002 | `list_my_orders`, `get_order`, `cancel_order`, `quote_order`, `place_order`, `pay_order`; gRPC `OrderInternal` |
+| product | 8003 | `search_products`, `get_product`, `check_stock`; gRPC `ProductInternal` |
+| payment | 8004 | `get_payment`, `refund_payment` (high risk); gRPC `PaymentInternal` |
+| shipping | 8005 | `get_shipment`, `update_shipping_address`; gRPC `ShippingInternal` |
 | gateway | 8010 | `/tools`, `/tools/meta`, `/invoke`, `/audit`, `/internal/execute-ticket/{id}` |
-| approval | 8011 | `/tickets`, approve/reject |
+| approval | 8011 | `/tickets`, approve/reject; gRPC `ApprovalInternal` |
 | agent | 8020 | `/chat`, `/conversations/{id}`, `/traces/{id}` |
 | postgres | 5432 | mỗi service một DB |
+| redis | (nội bộ) | rate limit + khoá idempotency của Gateway |
 
-Mọi service có Swagger tại `http://localhost:<port>/docs`.
+gRPC của mọi service nghe ở cổng `50051` **trong mạng docker** (không mở ra host).
+
+Mọi service có Swagger tại `http://localhost:<port>/docs` (JSON: `/openapi.json`, là nguồn để Gateway sinh tool).
 
 Tài khoản seed (mật khẩu `password123`): `alice` (customer, đơn 1001–1003), `bob` (customer, đơn 1004–1005), `staff1` (staff). Đơn 1005 có ghi chú chứa prompt injection để demo tấn công gián tiếp.
 
@@ -73,12 +93,11 @@ docker compose up -d --build
 docker compose --profile test run --rm e2e
 ```
 
-**Unit test** từng service (SQLite in-memory + mock, không gọi Postgres hay OpenAI thật):
+**Unit test**:
 
 ```bash
-for s in auth order product payment shipping gateway approval agent; do
-  docker compose run --rm --no-deps $s pytest -q
-done
+(cd services/gateway && npm install && npm test)    # Gateway: registry từ Swagger, ép kiểu, Ajv, idempotency key
+docker compose run --rm --no-deps agent pytest -q    # Agent (Python): loop, guardrails
 ```
 
 Lưu ý: e2e và eval reset DB các service nghiệp vụ (xoá ticket, refund, thay đổi đơn đã demo) qua `POST /internal/reset`; chỉ bật `ALLOW_RESET=true` ở môi trường dev.
@@ -100,16 +119,21 @@ RATE_LIMIT_READ_PER_MIN=1000 RATE_LIMIT_WRITE_PER_MIN=1000 docker compose up -d 
 ## Cấu trúc
 
 ```
-libs/common/opspilot_common/   auth (JWT, system token), logging (JSON + X-Request-ID), errors, tools (x-agent-tool)
-services/<name>/app/           main, config, db, models, schemas, routers/, seed
-services/gateway/app/          registry (OpenAPI → ToolSpec), invoker, ratelimit, audit
-services/agent/app/            llm (OpenAI), loop, guardrails, tracing, prompts, gateway_client
+proto/                         hợp đồng gRPC giữa các service (product, order, payment, shipping, approval, auth)
+libs/node-common/src/          code TS dùng chung: JWT (jose), lỗi, log JSON + request id, gRPC client, outbox, dữ liệu demo
+libs/node-common/src/nest/     phần riêng NestJS: guard @Roles, filter lỗi, @AgentTool (x-agent-tool), bootstrap HTTP + gRPC
+services/<name>/               NestJS: src/ (main, app.module, *.controller, *.service, dto, seed), prisma/schema.prisma
+services/gateway/src/          Fastify: registry (Swagger → ToolSpec), invoker (Ajv), redis (rate limit, khoá), audit
+services/agent/app/            Python: llm (OpenAI), loop, guardrails, tracing, prompts, gateway_client
+libs/common/opspilot_common/   Python: auth, logging, errors (chỉ Agent dùng)
 ui/app.py                      Streamlit
 eval/                          scenarios.yaml, run_eval.py
 infra/postgres/init/           tạo các database
 ```
 
-Convention: mọi service có `GET /health`, log JSON một dòng (`ts, service, level, request_id, msg`), lỗi dạng `{"error": "<code>", "message": "<text>"}`, `X-Request-ID` được forward qua mọi lời gọi. Endpoint expose cho agent khai báo bằng `openapi_extra=agent_tool(name, risk, roles)`.
+Mỗi service TS build độc lập: `npm run build` chép `libs/node-common/src` vào `src/common/` (thư mục sinh ra, không commit), chạy `prisma generate` rồi `tsc`. Khi khởi động, container chạy `prisma db push` để tạo bảng của chính service đó trong DB riêng.
+
+Convention: mọi service có `GET /health`, log JSON một dòng (`ts, service, level, request_id, msg`), lỗi dạng `{"error": "<code>", "message": "<text>"}`, `X-Request-ID` được forward qua mọi lời gọi HTTP và qua metadata `x-request-id` của gRPC. Endpoint expose cho agent khai báo bằng decorator `@AgentTool(name, risk, roles)` (sinh `x-agent-tool` trong Swagger).
 
 ### Reset dữ liệu
 

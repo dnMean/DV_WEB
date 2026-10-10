@@ -1,0 +1,45 @@
+// Order: updates coming from Payment and Shipping (docs/USECASES.md section 4). All calls are idempotent.
+syntax = "proto3";
+
+package opspilot.order;
+
+service OrderInternal {
+  rpc GetOrder (OrderRef) returns (Order);
+  // Payment reports the absolute refunded total of the order.
+  rpc RefundApplied (RefundAppliedRequest) returns (Order);
+  // Shipping reports a shipment status change (IN_TRANSIT | DELIVERED).
+  rpc ShippingStatus (ShippingStatusRequest) returns (Order);
+}
+
+message OrderRef {
+  int32 order_id = 1;
+}
+
+message OrderItem {
+  int32 product_id = 1;
+  string name = 2;
+  int32 qty = 3;
+  int64 price = 4;
+}
+
+message Order {
+  int32 id = 1;
+  int32 user_id = 2;
+  string status = 3;
+  int64 total = 4;
+  int64 refunded_amount = 5;
+  repeated OrderItem items = 6;
+  string note = 7;
+  string created_at = 8;
+}
+
+message RefundAppliedRequest {
+  int32 order_id = 1;
+  int64 total_refunded = 2;
+  bool full = 3;
+}
+
+message ShippingStatusRequest {
+  int32 order_id = 1;
+  string status = 2;
+}
