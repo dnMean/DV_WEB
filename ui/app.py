@@ -11,6 +11,7 @@ APPROVAL_URL = os.getenv("APPROVAL_URL", "http://localhost:8011")
 GATEWAY_URL = os.getenv("GATEWAY_URL", "http://localhost:8010")
 SHIPPING_URL = os.getenv("SHIPPING_URL", "http://localhost:8005")
 ORDER_URL = os.getenv("ORDER_URL", "http://localhost:8002")
+PAYMENT_URL = os.getenv("PAYMENT_URL", "http://localhost:8004")
 
 STATUS_BADGE = {
     "done": ("✅", "Hoàn tất"),
@@ -367,6 +368,107 @@ def page_shipments() -> None:
                     unsafe_allow_html=True)
 
 
+PAY_LABEL = {"SUCCESS": "✅ Đã thanh toán", "PARTIALLY_REFUNDED": "↩️ Đã hoàn một phần", "REFUNDED": "↩️ Đã hoàn toàn bộ"}
+METHOD_LABEL = {"COD": "Tiền mặt khi nhận", "CARD": "Thẻ", "BANK_TRANSFER": "Chuyển khoản", "E_WALLET": "Ví điện tử"}
+
+
+def _load_my_orders(status: str | None) -> list[dict]:
+    """Every order of the logged-in customer (GET /orders is paginated, 50 per page)."""
+    orders, offset = [], 0
+    while True:
+        params = {"limit": 50, "offset": offset, **({"status": status} if status else {})}
+        resp = api("GET", f"{ORDER_URL}/orders", params=params)
+        if resp is None:
+            return orders
+        if not resp.is_success:
+            show_error(resp)
+            return orders
+        page = resp.json()
+        orders += page["orders"]
+        if not page["has_more"] or offset >= 1000:
+            return orders
+        offset += page["limit"]
+
+
+def _get_optional(url: str, **kwargs) -> dict | None:
+    """GET that treats 404 as "not there yet" (e.g. no payment / shipment for a pending order)."""
+    resp = api("GET", url, **kwargs)
+    if resp is None or resp.status_code == 404:
+        return None
+    if not resp.is_success:
+        show_error(resp)
+        return None
+    return resp.json()
+
+
+def page_my_orders() -> None:
+    st.title("📦 Đơn hàng của tôi")
+    st.caption("Muốn huỷ đơn, thanh toán, đổi địa chỉ hay hoàn tiền: hãy nhắn cho trợ lý ở trang Chat.")
+    status = st.selectbox("Trạng thái", [None, *ORDER_LABEL],
+                          format_func=lambda s: "Tất cả" if s is None else ORDER_LABEL[s])
+    orders = _load_my_orders(status)
+    if not orders:
+        st.info("Bạn chưa có đơn hàng nào." if status is None else "Không có đơn nào ở trạng thái này.")
+        return
+
+    c = st.columns(3)
+    c[0].metric("Số đơn", len(orders))
+    c[1].metric("Chờ thanh toán", sum(o["status"] == "PENDING" for o in orders))
+    c[2].metric("Đang giao", sum(o["status"] in ("PAID", "SHIPPING") for o in orders))
+    st.dataframe(
+        [{
+            "Mã đơn": f"#{o['id']}",
+            "Ngày đặt": o["created_at"][:16].replace("T", " "),
+            "Sản phẩm": o["items"],
+            "Tổng tiền": _money(o["total"]),
+            "Đã hoàn": _money(o["refunded_amount"]) if o["refunded_amount"] else "",
+            "Trạng thái": ORDER_LABEL.get(o["status"], o["status"]),
+        } for o in orders],
+        width="stretch", hide_index=True, height=min(38 * (len(orders) + 1), 420),
+    )
+
+    by_id = {o["id"]: o for o in orders}
+    order_id = st.selectbox("Xem chi tiết đơn", list(by_id),
+                            format_func=lambda i: f"#{i} · {by_id[i]['items']} · {ORDER_LABEL.get(by_id[i]['status'])}")
+    order = _get_optional(f"{ORDER_URL}/orders/{order_id}")
+    if order is None:
+        return
+    payment = _get_optional(f"{PAYMENT_URL}/payments", params={"order_id": order_id})
+    shipment = _get_optional(f"{SHIPPING_URL}/shipments/{order_id}")
+
+    with st.container(border=True):
+        c = st.columns(3)
+        c[0].metric("Đơn hàng", ORDER_LABEL.get(order["status"], order["status"]))
+        c[1].metric("Tổng tiền", _money(order["total"]))
+        c[2].metric("Thanh toán", PAY_LABEL.get(payment["status"], payment["status"]) if payment else "Chưa thanh toán")
+        st.dataframe(
+            [{"Sản phẩm": i["name"], "Số lượng": i["qty"], "Đơn giá": _money(i["price"]),
+              "Thành tiền": _money(i["qty"] * i["price"])} for i in order["items"]],
+            width="stretch", hide_index=True,
+        )
+        if payment:
+            st.caption(f"Thanh toán {_money(payment['amount'])} bằng {METHOD_LABEL.get(payment['method'], payment['method'])}"
+                       + (f" · đã hoàn {_money(payment['refunded_amount'])}" if payment["refunded_amount"] else ""))
+        if order["status"] == "PENDING":
+            st.info(f"Đơn đang chờ thanh toán. Để thanh toán, nhắn trợ lý: *thanh toán đơn {order_id} bằng thẻ*.")
+
+    st.subheader("Vận chuyển")
+    if shipment is None:
+        st.caption("Chưa có vận đơn (vận đơn được tạo sau khi thanh toán).")
+        return
+    st.caption(f"{shipment['carrier']} · mã vận đơn **{shipment['tracking_code']}** · "
+               f"{shipment['recipient_name']} · {shipment['recipient_phone']} · {shipment['address']}")
+    if shipment["status"] == "CANCELLED":
+        st.warning("⛔ Vận đơn đã huỷ do đơn được hoàn tiền trước khi giao.")
+    else:
+        _progress(shipment["status"])
+    icons = {"WAITING_PICKUP": "📦", "IN_TRANSIT": "🚚", "DELIVERED": "✅", "CANCELLED": "⛔"}
+    for e in reversed(shipment["events"]):
+        st.markdown(f"{icons.get(e['status'], '•')} **{e['description']}**  \n"
+                    f"<span style='opacity:.65'>{e['occurred_at'][:16].replace('T', ' ')} · {e['location']}</span>",
+                    unsafe_allow_html=True)
+
+
 def page_trace() -> None:
     st.title("🔎 Trace")
     trace_id = st.text_input("trace_id")
@@ -402,6 +504,8 @@ else:
     with st.sidebar:
         st.markdown(f"**{ss.username}** · `{ss.role}`")
         pages = {"Chat": page_chat}
+        if ss.role == "customer":
+            pages["Đơn hàng của tôi"] = page_my_orders
         if ss.role == "staff":
             pages.update({"Approvals": page_approvals, "Vận chuyển": page_shipments, "Tools": page_tools,
                           "Trace": page_trace})
