@@ -1,9 +1,10 @@
 """Run OpsPilot evaluation scenarios through the Agent /chat API and compare guardrail configs.
 
     python eval/run_eval.py --scenarios eval/scenarios.yaml --configs none,rules,rules_tool,full
+    python eval/run_eval.py --agent-modes single,multi --configs rules_tool     # single vs multi-agent
 
-Guardrail configs are applied per request via X-Guard-Config (requires INTERNAL_SECRET, read from
-the environment or .env). Results go to eval/results/<timestamp>.md, .csv and _details.csv.
+Guardrail configs are applied per request via X-Guard-Config and the agent architecture via X-Agent-Mode (both
+require INTERNAL_SECRET, read from the environment or .env). Results go to eval/results/<timestamp>.md, .csv and _details.csv.
 """
 import argparse
 import csv
@@ -36,9 +37,11 @@ ATTACK_CHECKS = {"tools_called_exclude", "answer_not_contains"}
 class Outcome:
     scenario: dict[str, Any]
     config: str
+    mode: str = ""  # "" = the agent's default AGENT_MODE
     status: str = ""
     answer: str = ""
     tools: list[str] = field(default_factory=list)
+    agents: list[str] = field(default_factory=list)  # agent_path of every turn (multi-agent mode)
     checks: dict[str, bool] = field(default_factory=dict)
     llm_calls: int = 0
     tokens: int = 0
@@ -114,13 +117,14 @@ class Runner:
             self._tokens[username] = resp.json()["access_token"]
         return self._tokens[username]
 
-    def run(self, scenario: dict[str, Any], config: str) -> Outcome:
-        out = Outcome(scenario, config)
+    def run(self, scenario: dict[str, Any], config: str, mode: str = "") -> Outcome:
+        out = Outcome(scenario, config, mode)
         turns = scenario.get("turns") or [scenario["message"]]
         headers = {
             "Authorization": f"Bearer {self.token(scenario['user'])}",
             "X-Internal-Secret": self.secret,
             "X-Guard-Config": json.dumps(CONFIGS[config]),
+            **({"X-Agent-Mode": mode} if mode else {}),
         }
         conversation_id = None
         try:
@@ -133,6 +137,7 @@ class Runner:
                 body = resp.json()
                 conversation_id = body["conversation_id"]
                 out.tools += [s["tool"] for s in body["steps"]]
+                out.agents += body.get("agent_path", [])
                 out.llm_calls += body.get("llm_calls", 0)
                 out.tokens += body["usage"].get("prompt_tokens", 0) + body["usage"].get("completion_tokens", 0)
                 out.latency_ms += body["latency_ms"]
@@ -195,12 +200,12 @@ def write_reports(results: dict[str, list[Outcome]], out_dir: Path, scenarios_pa
 
     with (out_dir / f"{stamp}_details.csv").open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["config", "id", "category", "user", "attack", "success", "status", "tools",
+        w.writerow(["config", "mode", "agents", "id", "category", "user", "attack", "success", "status", "tools",
                     "failed_checks", "llm_calls", "tokens", "latency_ms", "error", "answer"])
         for cfg, outs in results.items():
             for o in outs:
                 s = o.scenario
-                w.writerow([cfg, s["id"], s.get("category", ""), s["user"], bool(s.get("attack")), o.success,
+                w.writerow([o.config, o.mode or "default", " ".join(o.agents), s["id"], s.get("category", ""), s["user"], bool(s.get("attack")), o.success,
                             o.status, " ".join(o.tools), " ".join(k for k, v in o.checks.items() if not v),
                             o.llm_calls, o.tokens, round(o.latency_ms), o.error, o.answer])
 
@@ -216,9 +221,11 @@ def write_reports(results: dict[str, list[Outcome]], out_dir: Path, scenarios_pa
     for m in metrics:
         lines.append(f"| {m} | " + " | ".join(str(summaries[c][m]) for c in results) + " |")
     lines += ["", "Guardrail configs:", ""]
-    for c in results:
+    for c in dict.fromkeys(o.config for outs in results.values() for o in outs):
         on = [k for k, v in CONFIGS[c].items() if v] or ["(all off)"]
         lines.append(f"- **{c}**: {', '.join(on)}")
+    if any("/" in label for label in results):
+        lines.append("- columns `<mode>/<config>`: mode = agent architecture sent as X-Agent-Mode (single | multi)")
     lines += ["", "## Task success by category", "", "| Category | " + " | ".join(results) + " |",
               "|---|" + "---|" * len(results)]
     for cat in categories:
@@ -247,6 +254,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--scenarios", default=str(ROOT / "eval" / "scenarios.yaml"))
     parser.add_argument("--configs", default="none,rules,rules_tool,full")
+    parser.add_argument("--agent-modes", default="",
+                        help="comma-separated single,multi (default: the agent's AGENT_MODE, no header sent)")
     parser.add_argument("--agent-url", default="http://localhost:8020")
     parser.add_argument("--auth-url", default="http://localhost:8001")
     parser.add_argument("--env-file", default=str(ROOT / ".env"))
@@ -263,6 +272,9 @@ def main() -> None:
     unknown = [c for c in configs if c not in CONFIGS]
     if unknown:
         sys.exit(f"unknown config(s) {unknown}; choose from {list(CONFIGS)}")
+    modes = [m.strip() for m in args.agent_modes.split(",") if m.strip()] or [""]
+    if bad := [m for m in modes if m not in ("", "single", "multi")]:
+        sys.exit(f"unknown agent mode(s) {bad}; choose from single, multi")
     secret = os.getenv("INTERNAL_SECRET") or load_env_file(Path(args.env_file)).get("INTERNAL_SECRET")
     if not secret:
         sys.exit("INTERNAL_SECRET not found (env or --env-file)")
@@ -277,23 +289,25 @@ def main() -> None:
 
     runner = Runner(args.agent_url, args.auth_url, secret, args.password, args.timeout)
     results: dict[str, list[Outcome]] = {}
-    for cfg in configs:
+    for mode, cfg in [(m, c) for m in modes for c in configs]:
+        label = f"{mode}/{cfg}" if mode else cfg
         if not args.no_reset:
             for url in args.reset_urls.split(","):
                 r = runner.http.post(f"{url.rstrip('/')}/internal/reset", params={"extra_orders": 0},
                                      headers={"X-Internal-Secret": secret})
                 if r.status_code != 200:
                     sys.exit(f"reset {url} failed: {r.status_code} {r.text[:200]} (ALLOW_RESET=true?)")
-        print(f"== config {cfg}: {len(scenarios)} scenarios")
-        results[cfg] = []
+        print(f"== {label}: {len(scenarios)} scenarios")
+        results[label] = []
         for s in scenarios:
             t0 = time.perf_counter()
-            o = runner.run(s, cfg)
-            results[cfg].append(o)
+            o = runner.run(s, cfg, mode)
+            results[label].append(o)
             mark = "PASS" if o.success else "FAIL"
             print(f"  {mark} {s['id']:<34} status={o.status:<16} tools={','.join(o.tools) or '-'} "
+                  f"{'agents=' + '>'.join(o.agents) + ' ' if mode == 'multi' else ''}"
                   f"({time.perf_counter() - t0:.1f}s){' ' + o.error if o.error else ''}")
-        print("  " + json.dumps(summarize(results[cfg]), ensure_ascii=False))
+        print("  " + json.dumps(summarize(results[label]), ensure_ascii=False))
 
     report = write_reports(results, Path(args.out), args.scenarios)
     print(f"\nReport: {report}")

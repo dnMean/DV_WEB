@@ -228,6 +228,8 @@ Chi tiết quy tắc: [USECASES.md mục 3b](USECASES.md).
 
 Thư mục: [services/agent/app/](../services/agent/app/). Agent loop **tự viết**, không dùng LangChain/LangGraph, nên đọc code là thấy hết.
 
+> **Cập nhật:** agent đã có chế độ **multi-agent** (mặc định): router chọn agent chuyên trách, mỗi agent chỉ thấy công cụ trong phạm vi của nó, có thể chuyển việc bằng `transfer_to_agent`; guardrails gom vào `GuardAgent` và báo rõ lớp nào bật/tắt. Mục này mô tả vòng lặp chung (giống nhau ở cả hai chế độ); phần multi-agent và guardrails xem [AGENTS_GUARDRAILS.md](AGENTS_GUARDRAILS.md).
+
 ```
                 ┌──────────────────────────────────────────────┐
   HTTP layer    │ main.py · routers/chat.py · schemas.py       │  FastAPI endpoint, auth, DTO

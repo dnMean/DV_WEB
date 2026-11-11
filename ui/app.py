@@ -22,6 +22,34 @@ STATUS_BADGE = {
     "error": ("⚠️", "Lỗi"),
 }
 
+# Guardrail switches in the sidebar (UI_DEV_CONTROLS=true): the chat always runs the multi-agent design and each
+# guardrail layer can be turned on/off to see the difference. The agent only honours X-Guard-Config / X-Agent-Mode
+# together with INTERNAL_SECRET, which the UI container reads from .env, so keep this off outside the classroom.
+GUARD_TOGGLES = os.getenv("UI_DEV_CONTROLS", "false").lower() in ("1", "true", "yes")
+INTERNAL_SECRET = os.getenv("INTERNAL_SECRET", "")
+
+AGENT_LABEL = {
+    "single": "🤖 Agent đơn", "order": "📦 Đơn hàng & Vận chuyển", "sales": "🛒 Sản phẩm & Đặt hàng",
+    "refund": "💸 Thanh toán & Hoàn tiền", "general": "💬 Tiếp nhận",
+}
+LAYER_LABEL = {
+    "input_rules": "① Lọc đầu vào (regex)", "input_llm": "② Bộ phân loại LLM",
+    "tool_output": "③ Quét dữ liệu công cụ", "output_pii": "④ Che PII",
+}
+GUARD_ACTION = {
+    "off": ("⚪", "TẮT"), "pass": ("🟢", "cho qua"), "block": ("🛑", "CHẶN"), "wrap": ("🟢", "đánh dấu untrusted"),
+    "hide": ("🙈", "ẩn nội dung nghi injection"), "redact": ("🟡", "che PII"), "skip": ("➖", "không áp dụng"),
+}
+# quick presets, same names as the eval (Bảng 1); None = the server's default configuration
+GUARD_PRESETS = {
+    "Mặc định": None,
+    "Không bảo vệ (none)": {"input_rules": False, "input_llm": False, "tool_output": False, "output_pii": False},
+    "Lọc đầu vào (rules)": {"input_rules": True, "input_llm": False, "tool_output": False, "output_pii": False},
+    "+ Quét kết quả (rules_tool)": {"input_rules": True, "input_llm": False, "tool_output": True, "output_pii": False},
+    "Đầy đủ (full)": {"input_rules": True, "input_llm": True, "tool_output": True, "output_pii": True},
+}
+FALLBACK_GUARD_DEFAULT = {"input_rules": True, "input_llm": False, "tool_output": True, "output_pii": True}
+
 st.set_page_config(page_title="OpsPilot", page_icon="🧭", layout="wide")
 ss = st.session_state
 ss.setdefault("token", None)
@@ -81,14 +109,111 @@ def _render_steps(meta: dict) -> None:
         cols[1].caption(f"🎫 Ticket: `{meta['ticket_id']}`")
     usage = meta.get("usage") or {}
     cols[2].caption(f"🔢 {usage.get('prompt_tokens', 0)}+{usage.get('completion_tokens', 0)} tokens · "
-                    f"{meta.get('latency_ms', 0):.0f} ms")
+                    f"{meta.get('latency_ms', 0):.0f} ms · {meta.get('llm_calls', 0)} lời gọi LLM")
+    path = meta.get("agent_path") or []
+    if meta.get("agent_mode") == "multi":
+        st.caption("🧭 Router → " + (" → ".join(AGENT_LABEL.get(a, a) for a in path) if path else "(không tới agent nào)"))
+    elif path:
+        st.caption(AGENT_LABEL["single"])
+    _render_guard(meta.get("guard") or {})
     with st.expander(f"Trace ({len(meta.get('steps', []))} tool call)"):
         st.caption(f"trace_id: `{meta.get('trace_id')}`")
         for s in meta.get("steps", []):
             icon = {"ok": "🟢", "pending_approval": "🟡"}.get(s.get("status"), "🔴")
+            who = f" · {AGENT_LABEL.get(s['agent'], s['agent'])}" if s.get("agent") and s["agent"] != "single" else ""
             st.markdown(f"{icon} **Bước {s['step']}** `{s['tool']}` → `{s.get('status')}`"
-                        + (f" ({s['error']})" if s.get("error") else ""))
+                        + (f" ({s['error']})" if s.get("error") else "") + who)
             st.code(json.dumps(s.get("arguments"), ensure_ascii=False), language="json")
+
+
+def _render_guard(guard: dict) -> None:
+    """One line per guardrail layer: on/off and what it did in this turn."""
+    config, events = guard.get("config") or {}, guard.get("events") or []
+    if not config:
+        return
+    flagged = any(e["action"] in ("block", "hide", "redact") for e in events)
+    off = [layer for layer, on in config.items() if not on]
+    title = "🛡️ Guardrails: " + ("tất cả đang bật" if not off else f"{len(off)}/{len(config)} lớp TẮT")
+    with st.expander(title + (" · 🚩 có can thiệp" if flagged else ""), expanded=flagged):
+        for layer, on in config.items():
+            mine = [e for e in events if e["layer"] == layer]
+            if not on:
+                reason = mine[0]["reason"] if mine else ""
+                st.markdown(f"⚪ **{LAYER_LABEL.get(layer, layer)}** — TẮT" + (f"  \n  _{reason}_" if reason else ""))
+                continue
+            if not mine:
+                st.markdown(f"🟢 **{LAYER_LABEL.get(layer, layer)}** — bật (lượt này không chạy tới)")
+                continue
+            parts = []
+            for e in mine:
+                icon, label = GUARD_ACTION.get(e["action"], ("❔", e["action"]))
+                where = f" `{e['tool']}`" if e.get("tool") else ""
+                detail = f": {e['reason']}" if e["action"] in ("block", "hide", "redact") and e.get("reason") else ""
+                parts.append(f"{icon} {label}{where}{detail}")
+            st.markdown(f"**{LAYER_LABEL.get(layer, layer)}** — bật · " + " · ".join(parts))
+
+
+def _guard_info() -> dict:
+    """Server default config + layer descriptions (GET /guardrails), loaded once per session."""
+    if "guard_info" not in ss:
+        resp = api("GET", f"{AGENT_URL}/guardrails")
+        ss.guard_info = resp.json() if resp is not None and resp.is_success else {"default": FALLBACK_GUARD_DEFAULT,
+                                                                                  "layers": {}}
+    return ss.guard_info
+
+
+def _guard_config() -> dict:
+    """Current state of the sidebar switches."""
+    default = _guard_info()["default"]
+    return {layer: bool(ss.get(f"g_{layer}", default[layer])) for layer in LAYER_LABEL}
+
+
+def _chat_headers() -> dict:
+    """Always the multi-agent design; the guardrail config only when it differs from the server default."""
+    if not (GUARD_TOGGLES and INTERNAL_SECRET):
+        return {}
+    headers = {"X-Internal-Secret": INTERNAL_SECRET, "X-Agent-Mode": "multi"}
+    config = _guard_config()
+    if config != _guard_info()["default"]:
+        headers["X-Guard-Config"] = json.dumps(config)
+    return headers
+
+
+def _apply_preset() -> None:
+    config = GUARD_PRESETS[ss.guard_preset] or _guard_info()["default"]
+    for layer, on in config.items():
+        ss[f"g_{layer}"] = on
+
+
+def _guard_controls() -> None:
+    st.divider()
+    st.markdown("**🛡️ Guardrails**")
+    info = _guard_info()
+    for layer in LAYER_LABEL:  # first run: start from the server default
+        ss.setdefault(f"g_{layer}", info["default"][layer])
+    st.selectbox("Cấu hình nhanh", list(GUARD_PRESETS), key="guard_preset", on_change=_apply_preset,
+                 help="Các cấu hình dùng trong Bảng 1 của báo cáo; sau đó vẫn bật/tắt được từng lớp bên dưới.")
+    for layer, label in LAYER_LABEL.items():
+        desc = info["layers"].get(layer, {})
+        help_text = (f"Chống: {desc['mitigates']}. Khi tắt: {desc['when_off']}" if desc else None)
+        st.toggle(label, key=f"g_{layer}", help=help_text)
+    off = [LAYER_LABEL[k] for k, on in _guard_config().items() if not on]
+    if off:
+        st.warning("Đang TẮT: " + ", ".join(off))
+    else:
+        st.caption("Tất cả các lớp đang bật.")
+
+
+def _guard_banner() -> None:
+    """Above the chat: which layers the next message will go through."""
+    if not (GUARD_TOGGLES and INTERNAL_SECRET):
+        return
+    config = _guard_config()
+    off = [LAYER_LABEL[k] for k, on in config.items() if not on]
+    if off:
+        st.warning("🛡️ Tin nhắn tiếp theo chạy với guardrails TẮT: " + ", ".join(off))
+    else:
+        st.caption("🛡️ Tin nhắn tiếp theo chạy với cả 4 lớp guardrail.")
 
 
 def _list_conversations() -> list[dict]:
@@ -113,6 +238,7 @@ def _reload_conversation() -> None:
 
 def page_chat() -> None:
     st.title("💬 Chat với trợ lý CSKH")
+    _guard_banner()
     c1, c2, c3 = st.columns([1, 1, 3])
     if c1.button("🆕 Hội thoại mới"):
         ss.conversation_id, ss.chat_log = None, []
@@ -153,7 +279,8 @@ def page_chat() -> None:
         return
     ss.chat_log.append({"role": "user", "content": message})
     with st.spinner("Đang xử lý..."):
-        resp = api("POST", f"{AGENT_URL}/chat", json={"conversation_id": ss.conversation_id, "message": message})
+        resp = api("POST", f"{AGENT_URL}/chat", json={"conversation_id": ss.conversation_id, "message": message},
+                   headers=_chat_headers())
     if resp is None:
         return
     if not resp.is_success:
@@ -236,6 +363,46 @@ def page_tools() -> None:
     resp = api("GET", f"{GATEWAY_URL}/audit", params={"limit": 30})
     if resp is not None and resp.is_success:
         st.dataframe(resp.json(), width="stretch", hide_index=True)
+
+
+def page_architecture() -> None:
+    """How a message is handled: the agents (with the tools your role gets) and the guardrail layers."""
+    st.title("🧩 Agents & Guardrails")
+    resp = api("GET", f"{AGENT_URL}/agents")
+    if resp is None:
+        return
+    if not resp.is_success:
+        show_error(resp)
+        return
+    info = resp.json()
+    st.markdown(f"Kiến trúc: **multi-agent** · chuyển agent tối đa **{info['max_handoffs']}** lần mỗi lượt")
+    st.markdown(
+        "**Multi-agent**: tin nhắn → ① ② guardrail đầu vào → **Router** (1 lời gọi LLM, không công cụ) chọn agent → "
+        "agent chuyên trách gọi công cụ **trong phạm vi của nó** qua Tool Gateway (③ quét kết quả) → có thể "
+        "`transfer_to_agent` sang agent khác → ④ che PII → người dùng."
+    )
+    st.dataframe(
+        [{"agent": AGENT_LABEL.get(a["name"], a["name"]), "phạm vi": a["scope"],
+          "công cụ (theo vai trò của bạn)": ", ".join(a["tools"]) or "—"} for a in info["agents"]],
+        width="stretch", hide_index=True,
+    )
+    if info.get("unassigned_tools"):
+        st.warning("Công cụ chưa gán cho agent nào (không dùng được ở chế độ multi): "
+                   + ", ".join(info["unassigned_tools"]))
+
+    resp = api("GET", f"{AGENT_URL}/guardrails")
+    if resp is None or not resp.is_success:
+        return
+    g = resp.json()
+    st.subheader("Guardrails")
+    st.dataframe(
+        [{"lớp": LAYER_LABEL.get(k, k), "mặc định": "BẬT" if g["default"][k] else "TẮT", "chống": v["mitigates"],
+          "theo tài liệu": v["reference"], "khi tắt": v["when_off"]} for k, v in g["layers"].items()],
+        width="stretch", hide_index=True,
+    )
+    st.caption("Cấu hình đặt sẵn (dùng trong eval, Bảng 1): "
+               + " · ".join(f"`{name}` = {', '.join(k for k, on in cfg.items() if on) or 'không lớp nào'}"
+                            for name, cfg in g["presets"].items()))
 
 
 ORDER_LABEL = {
@@ -509,7 +676,10 @@ else:
         if ss.role == "staff":
             pages.update({"Approvals": page_approvals, "Vận chuyển": page_shipments, "Tools": page_tools,
                           "Trace": page_trace})
+        pages["Agents & Guardrails"] = page_architecture
         choice = st.radio("Trang", list(pages))
+        if GUARD_TOGGLES and INTERNAL_SECRET:
+            _guard_controls()
         if st.button("Đăng xuất"):
             for k in ("token", "role", "user_id", "username", "conversation_id"):
                 ss.pop(k, None)

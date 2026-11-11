@@ -13,6 +13,9 @@ os.environ.update({
     "AGENT_MAX_STEPS": "6",
     "AGENT_MAX_TOKENS": "12000",
     "AGENT_MAX_SAME_CALL": "2",
+    # the original tests script the single agent; tests/test_multi_agent.py switches with X-Agent-Mode
+    "AGENT_MODE": "single",
+    "AGENT_MAX_HANDOFFS": "2",
 })
 os.environ["ALLOW_RESET"] = "true"
 os.environ["DEMO_EXTRA_ORDERS"] = "0"  # unit tests use the 5 hand-written orders
@@ -32,9 +35,11 @@ from app.db import Base, engine  # noqa: E402
 from app.llm import LLMResponse, ToolCall  # noqa: E402
 from app.main import app  # noqa: E402
 
+TOOL_NAMES = ("get_order", "get_shipment", "get_payment", "refund_payment", "list_my_orders",
+              "search_products", "quote_order", "place_order", "check_refund_eligibility")
 TOOLS = [
     {"type": "function", "function": {"name": n, "description": n, "parameters": {"type": "object", "properties": {}}}}
-    for n in ("get_order", "get_shipment", "get_payment", "refund_payment", "list_my_orders")
+    for n in TOOL_NAMES
 ]
 
 
@@ -56,9 +61,11 @@ class FakeLLM:
     def __init__(self):
         self.script: list[LLMResponse | Exception | Callable[[list], LLMResponse]] = []
         self.received: list[list[dict[str, Any]]] = []
+        self.tools_received: list[list[str]] = []  # tool names offered on each call
 
     def chat(self, messages, tools=None):
         self.received.append([dict(m) for m in messages])
+        self.tools_received.append([t["function"]["name"] for t in tools or []])
         if not self.script:
             return reply("(hết kịch bản)")
         item = self.script.pop(0)

@@ -19,6 +19,9 @@ class ChatOut(BaseModel):
     usage: dict[str, int]
     latency_ms: float
     llm_calls: int
+    agent_mode: str = "single"
+    agent_path: list[str] = []
+    guard: dict[str, Any] = {}
 
 
 class MessageOut(BaseModel):

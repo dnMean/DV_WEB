@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     LLM_RETRIES: int = 2
     LLM_BACKOFF_SECONDS: float = 1.0
 
+    AGENT_MODE: str = "multi"  # single | multi (router + specialist agents, see app/agents.py)
+    AGENT_MAX_HANDOFFS: int = 2  # multi mode: transfers between specialists in one turn
     AGENT_MAX_STEPS: int = 6
     AGENT_MAX_TOKENS: int = 12000
     AGENT_MAX_SAME_CALL: int = 2

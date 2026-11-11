@@ -1,13 +1,13 @@
 # OpsPilot
 
-AI Agent gọi microservices như tools, có thiết kế, giới hạn và kiểm soát. Spec đầy đủ: [SPEC.md](SPEC.md). **Use case và quy tắc nghiệp vụ xuyên service: [docs/USECASES.md](docs/USECASES.md)** (nguồn sự thật cho hành vi; mỗi UC có test e2e). Các quyết định thiết kế: [docs/DECISIONS.md](docs/DECISIONS.md).
+AI Agent gọi microservices như tools, có thiết kế, giới hạn và kiểm soát. Spec đầy đủ: [SPEC.md](SPEC.md). **Use case và quy tắc nghiệp vụ xuyên service: [docs/USECASES.md](docs/USECASES.md)** (nguồn sự thật cho hành vi; mỗi UC có test e2e). Các quyết định thiết kế: [docs/DECISIONS.md](docs/DECISIONS.md). **Multi-agent và bật/tắt guardrails: [docs/AGENTS_GUARDRAILS.md](docs/AGENTS_GUARDRAILS.md).** Tài liệu cho người mới: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Công nghệ
 
 | Thành phần | Công nghệ | Ghi chú |
 |---|---|---|
 | UI | Python, Streamlit | Chat / Approvals / Vận chuyển / Tools / Trace |
-| Agent | Python, FastAPI, OpenAI SDK, agent loop tự viết | Guardrails, giới hạn 6 vòng / 12.000 token |
+| Agent | Python, FastAPI, OpenAI SDK, agent loop tự viết | Multi-agent (router + agent đơn hàng / bán hàng / hoàn tiền / tiếp nhận) hoặc single (`AGENT_MODE`); GuardAgent 4 lớp; giới hạn 6 vòng / 12.000 token |
 | Tool Gateway | TypeScript, Fastify, Ajv, Redis | Registry tool đọc từ Swagger các service; Ajv kiểm tra tham số theo JSON Schema; Redis giữ rate limit và khoá idempotency |
 | Auth, Order, Product, Payment, Shipping, Approval | TypeScript, NestJS, `@nestjs/swagger`, Prisma, `jose` (JWT) | Mỗi service là **một microservice độc lập**: container riêng, DB riêng, HTTP (REST + Swagger) cho Gateway/UI và **gRPC** cho service khác |
 | Giao tiếp service ↔ service | gRPC (`@grpc/grpc-js`), hợp đồng trong [proto/](proto/) | Đồng bộ (đặt hàng, thanh toán, huỷ vận đơn) và qua outbox (cộng kho, đồng bộ trạng thái) |
@@ -29,6 +29,7 @@ UI ──HTTP──► Agent ──HTTP──► Gateway ──HTTP (tool theo S
 | 4 | Approval + Guardrails | ✅ |
 | 5 | Evaluation (56 kịch bản, 4 cấu hình guardrail) | ✅ (Langfuse: chưa làm, tuỳ chọn) |
 | 6 | Hỏi sản phẩm, đặt hàng + thanh toán giả lập qua chat | ✅ |
+| 7 | Multi-agent (router + chuyên trách, handoff), guardrails hiển thị bật/tắt từng lớp | ✅ (chưa đo lại eval cho multi) |
 
 ## Chạy
 
@@ -51,7 +52,7 @@ Mở http://localhost:8501 và đăng nhập.
 | shipping | 8005 | `get_shipment`, `update_shipping_address`; gRPC `ShippingInternal` |
 | gateway | 8010 | `/tools`, `/tools/meta`, `/invoke`, `/audit`, `/internal/execute-ticket/{id}` |
 | approval | 8011 | `/tickets`, approve/reject; gRPC `ApprovalInternal` |
-| agent | 8020 | `/chat`, `/conversations/{id}`, `/traces/{id}` |
+| agent | 8020 | `/chat`, `/conversations/{id}`, `/traces/{id}`, `/agents`, `/guardrails` |
 | postgres | 5432 | mỗi service một DB |
 | redis | (nội bộ) | rate limit + khoá idempotency của Gateway |
 
@@ -108,6 +109,7 @@ Lưu ý: e2e và eval reset DB các service nghiệp vụ (xoá ticket, refund, 
 python3 -m venv .venv && .venv/bin/pip install -r eval/requirements.txt
 RATE_LIMIT_READ_PER_MIN=1000 RATE_LIMIT_WRITE_PER_MIN=1000 docker compose up -d --build   # script tự reset dữ liệu trước mỗi cấu hình
 .venv/bin/python eval/run_eval.py --scenarios eval/scenarios.yaml --configs none,rules,rules_tool,full
+.venv/bin/python eval/run_eval.py --agent-modes single,multi --configs rules_tool   # so sánh single / multi-agent
 ```
 
 - 56 kịch bản trong [eval/scenarios.yaml](eval/scenarios.yaml): tra cứu, multi-step, thiếu thông tin, đặt hàng, vượt quyền, thao tác rủi ro, direct injection, indirect injection, không liên quan.

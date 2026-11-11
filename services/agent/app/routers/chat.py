@@ -9,12 +9,12 @@ from sqlalchemy.orm import Session
 from opspilot_common.auth import CurrentUser, require_roles
 from opspilot_common.errors import AppError
 
-from app import prompts
+from app import agents, prompts
 from app.config import Settings, get_settings
 from app.db import get_db
-from app.gateway_client import GatewayClient
-from app.guardrails import GuardConfig
-from app.loop import AgentRunner, get_owned_conversation
+from app.gateway_client import GatewayClient, GatewayError
+from app.guardrails import LAYERS, PRESETS, GuardConfig
+from app.loop import AGENT_MODES, AgentRunner, get_owned_conversation
 from app.models import Conversation, Message, Trace, TraceEvent
 from app.schemas import ChatIn, ChatOut, ConversationOut, ConversationSummaryOut, MessageOut, TicketCallbackIn, TraceEventOut, TraceOut
 
@@ -42,6 +42,17 @@ def _guard_config(settings: Settings, override: str | None, secret: str | None) 
         raise AppError(400, "bad_request", "X-Guard-Config phải là JSON object")
 
 
+def _agent_mode(settings: Settings, override: str | None, secret: str | None) -> str:
+    """X-Agent-Mode (single | multi) lets eval and the demo UI compare both designs; internal secret required."""
+    if not override:
+        return settings.AGENT_MODE
+    if not _internal_ok(secret, settings):
+        raise AppError(403, "forbidden", "X-Agent-Mode chỉ dùng được kèm X-Internal-Secret")
+    if override not in AGENT_MODES:
+        raise AppError(400, "bad_request", f"X-Agent-Mode phải là một trong {list(AGENT_MODES)}")
+    return override
+
+
 @router.post("/chat", response_model=ChatOut, summary="Gửi tin nhắn cho agent")
 def chat(
     body: ChatIn,
@@ -50,14 +61,50 @@ def chat(
     settings: Settings = Depends(get_settings),
     db: Session = Depends(get_db),
     x_guard_config: str | None = Header(None, alias="X-Guard-Config"),
+    x_agent_mode: str | None = Header(None, alias="X-Agent-Mode"),
     x_internal_secret: str | None = Header(None, alias=INTERNAL_SECRET_HEADER),
 ):
     guard = _guard_config(settings, x_guard_config, x_internal_secret)
+    mode = _agent_mode(settings, x_agent_mode, x_internal_secret)
     gateway = GatewayClient(request.app.state.http, settings.GATEWAY_URL, settings.AUTH_URL,
                             settings.TOOL_TIMEOUT_SECONDS)
-    runner = AgentRunner(settings, request.app.state.llm, gateway, guard)
+    runner = AgentRunner(settings, request.app.state.llm, gateway, guard, mode)
     result = runner.run(db, user, body.message, body.conversation_id)
     return ChatOut(**result.__dict__)
+
+
+@router.get("/agents", summary="Các agent, công cụ của từng agent (theo vai trò của bạn) và chế độ mặc định")
+def list_agents(
+    request: Request,
+    user: CurrentUser = Depends(_customer_or_staff),
+    settings: Settings = Depends(get_settings),
+):
+    gateway = GatewayClient(request.app.state.http, settings.GATEWAY_URL, settings.AUTH_URL,
+                            settings.TOOL_TIMEOUT_SECONDS)
+    try:
+        available = [t["function"]["name"] for t in gateway.list_tools(user.token)]
+    except GatewayError:
+        available = []
+    return {
+        "default_mode": settings.AGENT_MODE,
+        "max_handoffs": settings.AGENT_MAX_HANDOFFS,
+        "router": {"name": "router", "title": "Agent điều phối",
+                   "description": "Một lời gọi LLM không có công cụ, chọn agent chuyên trách cho tin nhắn."},
+        "agents": [
+            {"name": a.name, "title": a.title, "scope": a.scope,
+             "tools": sorted(t for t in available if a.owns(t))}
+            for a in agents.SPECIALISTS.values()
+        ],
+        "unassigned_tools": [t for t in available if not any(a.owns(t) for a in agents.SPECIALISTS.values())],
+    }
+
+
+@router.get("/guardrails", summary="Các lớp guardrail, cấu hình mặc định, cấu hình đặt sẵn và tài liệu tương ứng")
+def list_guardrails(
+    _: CurrentUser = Depends(_customer_or_staff),
+    settings: Settings = Depends(get_settings),
+):
+    return {"default": GuardConfig.from_settings(settings).as_dict(), "layers": LAYERS, "presets": PRESETS}
 
 
 @router.get("/conversations", response_model=list[ConversationSummaryOut],
